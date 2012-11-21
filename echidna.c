@@ -52,7 +52,14 @@
 #define IS_STDIN_ALIVE(w)   ((w)->status & 1)
 #define IS_STDOUT_ALIVE(w)  ((w)->status & 2)
 
-typedef struct {
+#define FORMAT_UNDECIDED    0
+#define FORMAT_FASTQ        1
+#define FORMAT_FASTA        2
+
+struct _WORKER;
+struct _SESSION;
+
+typedef struct _WORKER {
     int workerid;
     int status;
     pid_t pid;
@@ -62,10 +69,11 @@ typedef struct {
     QUEUE *inbuf;
     QUEUE *outbuf;
 
+    int (*input_handler)(struct _SESSION *sess, struct _WORKER *worker);
     uint64_t lineno;
 } WORKER;
 
-typedef struct {
+typedef struct _SESSION {
     int num_workers;
     int running_workers;
     WORKER *workers;
@@ -75,6 +83,7 @@ typedef struct {
     QUEUE *inbuf;
     QUEUE *outbuf;
 
+    int (*input_handler)(struct _SESSION *sess);
     uint64_t lineno;
     const char *command;
 } SESSION;
@@ -120,63 +129,7 @@ set_io_nonblocking(int fd)
 }
 
 static int
-launch_workers(SESSION *sess)
-{
-    int i, j;
-
-    sess->workers = malloc(sizeof(WORKER) * sess->num_workers);
-    if (sess->workers == NULL)
-        return -1;
-
-    memset(sess->workers, 0, sizeof(WORKER) * sess->num_workers);
-
-    for (i = 0; i < sess->num_workers; i++) {
-        int stdin_pipes[2], stdout_pipes[2];
-
-        sess->workers[i].workerid = i;
-
-        if (pipe(stdin_pipes) != 0 || pipe(stdout_pipes) != 0)
-            errx(2, "Failed to create new pipes.\n");
-
-        if ((sess->workers[i].pid = fork()) == 0) {
-            // child
-            free(sess->workers);
-
-            dup2(stdin_pipes[0], STDIN_FILENO);
-            dup2(stdout_pipes[1], STDOUT_FILENO);
-            close(stdin_pipes[1]);
-            close(stdout_pipes[0]);
-
-            for (j = 0; j < i; j++)
-                if (sess->workers[j].status == STATUS_RUNNING) {
-                    close(sess->workers[j].stdin_fd);
-                    close(sess->workers[j].stdout_fd);
-                }
-
-            execl("/bin/sh", "sh", "-c", sess->command, (char *)NULL);
-            errx(3, "Failed to invoke a worker process.\n");
-        }
-
-        sess->workers[i].stdin_fd = stdin_pipes[1];
-        sess->workers[i].stdout_fd = stdout_pipes[0];
-        close(stdin_pipes[0]);
-        close(stdout_pipes[1]);
-
-        sess->workers[i].status = STATUS_RUNNING;
-        sess->running_workers++;
-    }
-
-    for (i = 0; i < sess->num_workers; i++)
-        if (sess->workers[i].status == STATUS_RUNNING) {
-            set_io_nonblocking(sess->workers[i].stdin_fd);
-            set_io_nonblocking(sess->workers[i].stdout_fd);
-        }
-
-    return 0;
-}
-
-static int
-handle_input_from_stdin(SESSION *sess)
+handle_input_from_stdin_fastq(SESSION *sess)
 {
     char *head, *tail, *cur, *corner;
     int i, line_in_record;
@@ -239,7 +192,27 @@ handle_input_from_stdin(SESSION *sess)
 }
 
 static int
-handle_input_from_worker(SESSION *sess, WORKER *worker)
+handle_input_from_stdin_undecided(SESSION *sess)
+{
+    if (queue_num_filled(sess->inbuf) >= 1)
+        switch (sess->inbuf->data[sess->inbuf->front]) {
+        case '@': /* FASTQ */
+            sess->input_handler = handle_input_from_stdin_fastq;
+            return handle_input_from_stdin_fastq(sess);
+            break;
+        case '>': /* FASTA */
+            errx(99, "FASTA support is not implemented yet.\n");
+            break;
+        default:
+            errx(99, "Unknown input format: the first letter is not "
+                     "'@' or '>'.\n");
+        }
+
+    return 0;
+}
+
+static int
+handle_input_from_worker_fastq(SESSION *sess, WORKER *worker)
 {
     char *head, *tail, *cur, *leftend, *rightend;
     int line_in_record;
@@ -288,6 +261,83 @@ handle_input_from_worker(SESSION *sess, WORKER *worker)
                 cur = leftend;
         }
     }
+
+    return 0;
+}
+
+static int
+handle_input_from_worker_undecided(SESSION *sess, WORKER *worker)
+{
+    if (queue_num_filled(worker->inbuf) >= 1)
+        switch (worker->inbuf->data[worker->inbuf->front]) {
+        case '@': /* FASTQ */
+            worker->input_handler = handle_input_from_worker_fastq;
+            return handle_input_from_worker_fastq(sess, worker);
+            break;
+        case '>': /* FASTA */
+            errx(99, "FASTA support is not implemented yet.\n");
+            break;
+        default:
+            errx(99, "Unknown output format from worker: the first letter "
+                     "is not '@' or '>'.\n");
+        }
+
+    return 0;
+}
+
+static int
+launch_workers(SESSION *sess)
+{
+    int i, j;
+
+    sess->workers = malloc(sizeof(WORKER) * sess->num_workers);
+    if (sess->workers == NULL)
+        return -1;
+
+    memset(sess->workers, 0, sizeof(WORKER) * sess->num_workers);
+
+    for (i = 0; i < sess->num_workers; i++) {
+        int stdin_pipes[2], stdout_pipes[2];
+
+        sess->workers[i].workerid = i;
+
+        if (pipe(stdin_pipes) != 0 || pipe(stdout_pipes) != 0)
+            errx(2, "Failed to create new pipes.\n");
+
+        if ((sess->workers[i].pid = fork()) == 0) {
+            // child
+            free(sess->workers);
+
+            dup2(stdin_pipes[0], STDIN_FILENO);
+            dup2(stdout_pipes[1], STDOUT_FILENO);
+            close(stdin_pipes[1]);
+            close(stdout_pipes[0]);
+
+            for (j = 0; j < i; j++)
+                if (sess->workers[j].status == STATUS_RUNNING) {
+                    close(sess->workers[j].stdin_fd);
+                    close(sess->workers[j].stdout_fd);
+                }
+
+            execl("/bin/sh", "sh", "-c", sess->command, (char *)NULL);
+            errx(3, "Failed to invoke a worker process.\n");
+        }
+
+        sess->workers[i].stdin_fd = stdin_pipes[1];
+        sess->workers[i].stdout_fd = stdout_pipes[0];
+        close(stdin_pipes[0]);
+        close(stdout_pipes[1]);
+
+        sess->workers[i].input_handler = handle_input_from_worker_undecided;
+        sess->workers[i].status = STATUS_RUNNING;
+        sess->running_workers++;
+    }
+
+    for (i = 0; i < sess->num_workers; i++)
+        if (sess->workers[i].status == STATUS_RUNNING) {
+            set_io_nonblocking(sess->workers[i].stdin_fd);
+            set_io_nonblocking(sess->workers[i].stdout_fd);
+        }
 
     return 0;
 }
@@ -386,7 +436,7 @@ main_loop(SESSION *sess)
             else
                 queue_queued(sess->inbuf, rsize);
 
-            handle_input_from_stdin(sess);
+            sess->input_handler(sess);
         }
 
         if (FD_ISSET(STDOUT_FILENO, &wfds)) {
@@ -404,8 +454,9 @@ main_loop(SESSION *sess)
             queue_consumed(sess->outbuf, wsize);
 
             for (i = 0; i < sess->num_workers; i++) {
-                if (!is_queue_empty(sess->workers[i].inbuf))
-                    handle_input_from_worker(sess, &sess->workers[i]);
+                WORKER *w=&sess->workers[i];
+                if (!is_queue_empty(w->inbuf))
+                    w->input_handler(sess, w);
             }
         }
 
@@ -427,7 +478,7 @@ main_loop(SESSION *sess)
                 else
                     queue_queued(w->inbuf, rsize);
 
-                handle_input_from_worker(sess, w);
+                w->input_handler(sess, w);
             }
 
             if (FD_ISSET(w->stdin_fd, &wfds)) {
@@ -444,7 +495,7 @@ main_loop(SESSION *sess)
 
                 queue_consumed(w->outbuf, wsize);
 
-                handle_input_from_stdin(sess);
+                sess->input_handler(sess);
             }
             else if (stdin_closed && w->status == STATUS_RUNNING &&
                      is_queue_empty(w->outbuf)) {
@@ -479,6 +530,7 @@ main(int argc, char *argv[])
     memset(&session, 0, sizeof(SESSION));
     session.command = argv[1];
     session.num_workers = NUM_WORKERS;
+    session.input_handler = handle_input_from_stdin_undecided;
     global_session = &session;
 
     signal(SIGCHLD, sigchld_hdl);
