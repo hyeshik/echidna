@@ -7,8 +7,8 @@ echidna: echidna.c bufqueue.h
 
 longtest:
 	date
-	zcat longtest.fq.gz | ./echidna "fastx_clipper -a CTGTAGGCACCATCAATTCGTATGCCGTCTTCTGCTTG" | pigz -p3 -c - > long.gz
+	zcat longtest.fq.gz | ./echidna "fastx_clipper -a ATCAATTCGTATGCCGTCTTCTGCTTG" | pigz -p3 -c - > long.gz
 	date
 
 shorttest:
-	zcat shorttest.gz|./echidna "fastx_clipper -a CTGTAGGCACCATCAATTCGTATGCCGTCTTCTGCTTG"  > short2
+	zcat shorttest.gz|./echidna "fastx_clipper -a ATCAATTCGTATGCCGTCTTCTGCTTG" | pigz -p3 > shortresult.gz

@@ -23,20 +23,22 @@
  * THE SOFTWARE.
  */
 
+typedef uint32_t qsize_t;
+
 typedef struct {
-    size_t front;
-    size_t rear;
-    size_t size;
+    qsize_t front;
+    qsize_t rear;
+    qsize_t size;
     char data[1];
 } QUEUE;
 
 
 static QUEUE *
-queue_new(size_t size)
+queue_new(qsize_t size)
 {
     QUEUE *q;
 
-    q = malloc(sizeof(size_t)*3 + size);
+    q = malloc(sizeof(qsize_t)*3 + size);
     if (q == NULL)
         return NULL;
 
@@ -52,19 +54,19 @@ queue_destroy(QUEUE *q)
     free(q);
 }
 
-static inline size_t
+static inline qsize_t
 queue_num_filled(QUEUE *q)
 {
     return (q->rear + q->size - q->front) % q->size;
 }
 
-static inline size_t
+static inline qsize_t
 queue_num_vacant(QUEUE *q)
 {
     return (q->front + q->size - q->rear - 1) % q->size;
 }
 
-static inline size_t
+static inline qsize_t
 queue_num_continuous_vacant(QUEUE *q, char **bufstart)
 {
     *bufstart = q->data + q->rear;
@@ -78,7 +80,7 @@ queue_num_continuous_vacant(QUEUE *q, char **bufstart)
         return q->front - q->rear - 1;
 }
 
-static inline size_t
+static inline qsize_t
 queue_num_continuous_filled(QUEUE *q, char **bufstart)
 {
     *bufstart = q->data + q->front;
@@ -102,21 +104,21 @@ is_queue_full(QUEUE *q)
 }
 
 static inline void
-queue_consumed(QUEUE *q, size_t step)
+queue_consumed(QUEUE *q, qsize_t step)
 {
     q->front = (q->front + step) % q->size;
 }
 
 static inline void
-queue_queued(QUEUE *q, size_t step)
+queue_queued(QUEUE *q, qsize_t step)
 {
     q->rear = (q->rear + step) % q->size;
 }
 
 static inline int
-queue_put(QUEUE *q, char *data, size_t datalen)
+queue_put(QUEUE *q, char *data, qsize_t datalen)
 {
-    size_t right_vacant;
+    qsize_t right_vacant;
 
     if (datalen > queue_num_vacant(q))
     	return -1;
@@ -135,9 +137,9 @@ queue_put(QUEUE *q, char *data, size_t datalen)
 }
 
 static inline int
-queue_transfer(QUEUE *dst, QUEUE *src, size_t len)
+queue_transfer(QUEUE *dst, QUEUE *src, qsize_t len)
 {
-    size_t right_contig;
+    qsize_t right_contig;
     int ret;
 
     right_contig = src->size - src->front;

@@ -189,7 +189,7 @@ handle_input_from_stdin(SESSION *sess)
 
     while (cur != tail) {
         if (*cur == '\n' && ++line_in_record == 4) {
-            size_t recordsize;
+            qsize_t recordsize;
 
             recordsize = (head <= cur ? cur + 1 - head :
                           (corner - head) + (cur + 1 - sess->inbuf->data));
@@ -224,7 +224,7 @@ handle_input_from_stdin(SESSION *sess)
             line_in_record = 0;
 
             if (head != sess->inbuf->data + sess->inbuf->front) {
-                fprintf(stderr, "head and front mismatching - %p, %p, %ld\n",
+                fprintf(stderr, "head and front mismatching - %p, %p, %d\n",
                         head, sess->inbuf->data, sess->inbuf->front);
             }
         }
@@ -253,7 +253,7 @@ handle_input_from_worker(SESSION *sess, WORKER *worker)
 
     while (cur != tail) {
         if (*cur == '\n' && ++line_in_record == 4) {
-            size_t recordsize;
+            qsize_t recordsize;
 
             recordsize = (head <= cur ? cur + 1 - head :
                           (rightend - head) + (cur + 1 - leftend));
@@ -278,7 +278,7 @@ handle_input_from_worker(SESSION *sess, WORKER *worker)
             line_in_record = 0;
 
             if (head != leftend + worker->inbuf->front) {
-                fprintf(stderr, "head and front mismatching - %p, %p, %ld\n",
+                fprintf(stderr, "head and front mismatching - %p, %p, %d\n",
                         head, leftend, worker->inbuf->front);
             }
         }
@@ -364,7 +364,7 @@ main_loop(SESSION *sess)
 
         if (FD_ISSET(STDIN_FILENO, &rfds)) {
             char *bufstart;
-            size_t bufsize;
+            qsize_t bufsize;
             ssize_t rsize;
 
             bufsize = queue_num_continuous_vacant(sess->inbuf, &bufstart);
@@ -382,7 +382,7 @@ main_loop(SESSION *sess)
 
         if (FD_ISSET(STDOUT_FILENO, &wfds)) {
             char *bufstart;
-            size_t bufsize;
+            qsize_t bufsize;
             ssize_t wsize;
 
             bufsize = queue_num_continuous_filled(sess->outbuf, &bufstart);
@@ -405,7 +405,7 @@ main_loop(SESSION *sess)
 
             if (FD_ISSET(w->stdout_fd, &rfds)) {
                 char *bufstart;
-                size_t bufsize;
+                qsize_t bufsize;
                 ssize_t rsize;
 
                 bufsize = queue_num_continuous_vacant(w->inbuf, &bufstart);
@@ -423,7 +423,7 @@ main_loop(SESSION *sess)
 
             if (FD_ISSET(w->stdin_fd, &wfds)) {
                 char *bufstart;
-                size_t bufsize;
+                qsize_t bufsize;
                 ssize_t wsize;
 
                 bufsize = queue_num_continuous_filled(w->outbuf, &bufstart);
