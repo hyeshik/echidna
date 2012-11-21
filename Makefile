@@ -12,3 +12,4 @@ longtest:
 
 shorttest:
 	zcat shorttest.gz|./echidna "fastx_clipper -a ATCAATTCGTATGCCGTCTTCTGCTTG" | pigz -p3 > shortresult.gz
+	zcat shortresult.gz|wc -l

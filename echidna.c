@@ -318,6 +318,7 @@ main_loop(SESSION *sess)
 
     for (;;) {
         int maxfd=-1;
+        struct timeval tv, *timeout;
 
         if (stdin_closed || is_queue_full(sess->inbuf))
             FD_CLR(STDIN_FILENO, &rfds);
@@ -351,10 +352,18 @@ main_loop(SESSION *sess)
                 FD_CLR(w->stdin_fd, &wfds);
         }
 
-        if (maxfd < 0)
-            break;
+        if (maxfd < 0) {
+            if (sess->running_workers <= 0)
+                break;
 
-        if (select(maxfd + 1, &rfds, &wfds, &exfds, NULL) == -1) {
+            tv.tv_sec = 0;
+            tv.tv_usec = 50000;
+            timeout = &tv;
+        }
+        else
+            timeout = NULL;
+
+        if (select(maxfd + 1, &rfds, &wfds, &exfds, timeout) == -1) {
             if (errno == EINTR)
                 continue;
 
