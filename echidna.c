@@ -30,6 +30,8 @@
 #include <string.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <getopt.h>
+#include <stdarg.h>
 #include <err.h>
 #include <errno.h>
 #include <inttypes.h>
@@ -38,7 +40,7 @@
 #include <sys/wait.h>
 #include "bufqueue.h"
 
-#define NUM_WORKERS         8
+#define DEFAULT_NUM_WORKERS 4
 #define INQUEUE_SIZE        65536
 #define OUTQUEUE_SIZE       65536
 #define INLET_QUEUE_SIZE    262144
@@ -85,7 +87,10 @@ typedef struct _SESSION {
 
     int (*input_handler)(struct _SESSION *sess);
     uint64_t lineno;
+
+    /* Only one between `command' and `args' which is non-NULL is effective */
     const char *command;
+    char **args;
 } SESSION;
 
 static SESSION *global_session=NULL; /* for signal handlers */
@@ -93,9 +98,18 @@ static SESSION *global_session=NULL; /* for signal handlers */
 #define FD_MAX(a, b) ((a) > (b) ? (a) : (b))
 
 static void
-usage(char *command)
+error(int status, const char *msg, ...)
 {
-    printf("Usage: %s command\n", command);
+    va_list args;
+
+    fprintf(stderr, "echidna: ");
+
+    va_start(args, msg);
+    vfprintf(stderr, msg, args);
+    va_end(args);
+
+    if (status != 0)
+        exit(status);
 }
 
 static void
@@ -150,9 +164,9 @@ handle_input_from_stdin_fastq(SESSION *sess)
             for (i = 0; i < sess->num_workers; i++) {
                 int wselected=(sess->rr_next + i) % sess->num_workers;
 
-                if (*head != '@') {
-                    fprintf(stderr, "(stdin) OOPS!! ??? <%c>\n", *head);
-                }
+                if (*head != '@')
+                    error(0, "Unaligned FASTQ input at line %d\n",
+                          sess->lineno);
 
                 if (queue_transfer(sess->workers[wselected].outbuf,
                                    sess->inbuf, recordsize) != -1) {
@@ -176,10 +190,10 @@ handle_input_from_stdin_fastq(SESSION *sess)
             sess->lineno += 4;
             line_in_record = 0;
 
-            if (head != sess->inbuf->data + sess->inbuf->front) {
-                fprintf(stderr, "head and front mismatching - %p, %p, %d\n",
-                        head, sess->inbuf->data, sess->inbuf->front);
-            }
+            if (head != sess->inbuf->data + sess->inbuf->front)
+                error(0, "Internal programming error: head and front "
+                         "mismatching - %p, %p, %d\n",
+                         head, sess->inbuf->data, sess->inbuf->front);
         }
         else {
             cur++;
@@ -201,10 +215,10 @@ handle_input_from_stdin_undecided(SESSION *sess)
             return handle_input_from_stdin_fastq(sess);
             break;
         case '>': /* FASTA */
-            errx(99, "FASTA support is not implemented yet.\n");
+            error(1, "FASTA support is not implemented yet.\n");
             break;
         default:
-            errx(99, "Unknown input format: the first letter is not "
+            error(1, "Unknown input format: the first letter is not "
                      "'@' or '>'.\n");
         }
 
@@ -231,9 +245,9 @@ handle_input_from_worker_fastq(SESSION *sess, WORKER *worker)
             recordsize = (head <= cur ? cur + 1 - head :
                           (rightend - head) + (cur + 1 - leftend));
 
-            if (*head != '@') {
-                fprintf(stderr, "(worker %d) OOPS!! ??? <%c>\n", worker->workerid, *head);
-            }
+            if (*head != '@')
+                error(0, "(worker %d) Unaligned FASTQ input at"
+                        " line no %d\n", worker->workerid, worker->lineno);
 
             if (queue_transfer(sess->outbuf, worker->inbuf, recordsize) == -1)
                 break;
@@ -250,10 +264,10 @@ handle_input_from_worker_fastq(SESSION *sess, WORKER *worker)
             worker->lineno += 4;
             line_in_record = 0;
 
-            if (head != leftend + worker->inbuf->front) {
-                fprintf(stderr, "head and front mismatching - %p, %p, %d\n",
-                        head, leftend, worker->inbuf->front);
-            }
+            if (head != leftend + worker->inbuf->front)
+                error(0, "Internal programming error: head and front "
+                         "mismatching - %p, %p, %d\n",
+                         head, leftend, worker->inbuf->front);
         }
         else {
             cur++;
@@ -275,10 +289,10 @@ handle_input_from_worker_undecided(SESSION *sess, WORKER *worker)
             return handle_input_from_worker_fastq(sess, worker);
             break;
         case '>': /* FASTA */
-            errx(99, "FASTA support is not implemented yet.\n");
+            error(1, "FASTA support is not implemented yet.\n");
             break;
         default:
-            errx(99, "Unknown output format from worker: the first letter "
+            error(1, "Unknown output format from worker: the first letter "
                      "is not '@' or '>'.\n");
         }
 
@@ -302,7 +316,7 @@ launch_workers(SESSION *sess)
         sess->workers[i].workerid = i;
 
         if (pipe(stdin_pipes) != 0 || pipe(stdout_pipes) != 0)
-            errx(2, "Failed to create new pipes.\n");
+            error(1, "Failed to create new pipes.\n");
 
         if ((sess->workers[i].pid = fork()) == 0) {
             // child
@@ -319,8 +333,11 @@ launch_workers(SESSION *sess)
                     close(sess->workers[j].stdout_fd);
                 }
 
-            execl("/bin/sh", "sh", "-c", sess->command, (char *)NULL);
-            errx(3, "Failed to invoke a worker process.\n");
+            if (sess->command != NULL)
+                execl("/bin/sh", "sh", "-c", sess->command, (char *)NULL);
+            else
+                execvp(sess->args[0], sess->args);
+            error(1, "Failed to invoke a worker process.\n");
         }
 
         sess->workers[i].stdin_fd = stdin_pipes[1];
@@ -351,13 +368,13 @@ main_loop(SESSION *sess)
     sess->inbuf = queue_new(INLET_QUEUE_SIZE);
     sess->outbuf = queue_new(OUTLET_QUEUE_SIZE);
     if (sess->inbuf == NULL || sess->outbuf == NULL)
-        errx(10, "Can't allocate the mainstream queues.\n");
+        error(1, "Can't allocate the mainstream queues.\n");
 
     for (i = 0; i < sess->num_workers; i++) {
         sess->workers[i].inbuf = queue_new(INQUEUE_SIZE);
         sess->workers[i].outbuf = queue_new(OUTQUEUE_SIZE);
         if (sess->workers[i].inbuf == NULL || sess->workers[i].outbuf == NULL)
-            errx(11, "Failed to allocate buffer queues.\n");
+            error(1, "Failed to allocate buffer queues.\n");
     }
 
     FD_ZERO(&rfds);
@@ -418,7 +435,7 @@ main_loop(SESSION *sess)
                 continue;
 
             perror("echidna");
-            errx(6, "Error on select()\n");
+            error(1, "Error on select()\n");
         }
 
         if (FD_ISSET(STDIN_FILENO, &rfds)) {
@@ -429,7 +446,7 @@ main_loop(SESSION *sess)
             bufsize = queue_num_continuous_vacant(sess->inbuf, &bufstart);
 
             if ((rsize = read(STDIN_FILENO, bufstart, bufsize)) < 0)
-                errx(7, "Error on reading from stdin.\n");
+                error(1, "Error on reading from stdin.\n");
 
             if (rsize == 0)
                 stdin_closed = 1;
@@ -448,7 +465,7 @@ main_loop(SESSION *sess)
 
             if ((wsize = write(STDOUT_FILENO, bufstart, bufsize)) < 0) {
                 if (errno != EAGAIN)
-                    errx(19, "Error on writing to stdout.\n");
+                    error(1, "Error on writing to stdout.\n");
             }
 
             queue_consumed(sess->outbuf, wsize);
@@ -471,7 +488,7 @@ main_loop(SESSION *sess)
                 bufsize = queue_num_continuous_vacant(w->inbuf, &bufstart);
 
                 if ((rsize = read(w->stdout_fd, bufstart, bufsize)) < 0)
-                    errx(7, "Error on reading from worker %d.\n", i);
+                    error(1, "Error on reading from worker %d.\n", i);
 
                 if (rsize == 0)
                     w->status = STATUS_TERMINATED;
@@ -490,7 +507,7 @@ main_loop(SESSION *sess)
 
                 if ((wsize = write(w->stdin_fd, bufstart, bufsize)) < 0) {
                     if (errno != EAGAIN)
-                        errx(19, "Error on writing to worker %d.\n", i);
+                        error(1, "Error on writing to worker %d.\n", i);
                 }
 
                 queue_consumed(w->outbuf, wsize);
@@ -517,21 +534,67 @@ main_loop(SESSION *sess)
     return 0;
 }
 
+static void
+usage(char *command)
+{
+    printf("\
+Usage: %s [options] [command]\n\
+\n\
+Options:\n\
+  -p, --processes=n     invoke n worker processes (default 4)\n\
+  -c, --command=\"cmd\"   invoke a shell command\n\
+  -h, --help            display this help\n\
+\n\
+Report bugs to Hyeshik Chang <hyeshik@snu.ac.kr>\n", command);
+}
+
 int
-main(int argc, char *argv[])
+main(int argc, char **argv)
 {
     SESSION session;
-
-    if (argc < 2) {
-        usage(argv[0]);
-        return 1;
-    }
+    int c;
 
     memset(&session, 0, sizeof(SESSION));
-    session.command = argv[1];
-    session.num_workers = NUM_WORKERS;
+    session.num_workers = DEFAULT_NUM_WORKERS;
     session.input_handler = handle_input_from_stdin_undecided;
     global_session = &session;
+
+    for (;;) {
+        static struct option long_options[]={
+            {"command",     required_argument, 0, 'c'},
+            {"help",        no_argument,       0, 'h'},
+            {"processes",   required_argument, 0, 'p'},
+            {0, 0, 0, 0}
+        };
+        int option_index=0;
+  
+        c = getopt_long(argc, argv, "c:hp:", long_options, &option_index);
+  
+        if (c == -1)
+            break;
+  
+        switch (c) {
+        case 'p':
+            session.num_workers = atoi(optarg);
+            if (session.num_workers < 1)
+                error(1, "invalid thread number: %s\n", optarg);
+            break;
+        case 'c':
+            session.command = optarg;
+            break;
+        case 'h':
+        default:
+            usage(argv[0]);
+            return 0;
+        }
+    }
+
+    if (session.command == NULL) {
+        if (optind >= argc)
+            error(1, "command is not supplied.\n");
+
+        session.args = argv + optind;
+    }
 
     signal(SIGCHLD, sigchld_hdl);
 
