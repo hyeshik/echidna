@@ -1,0 +1,32 @@
+prefix=		@prefix@
+exec_prefix=	@exec_prefix@
+bindir=		@bindir@
+CFLAGS=		@CFLAGS@
+CC=		@CC@
+CPPFLAGS=	@CPPFLAGS@
+LIBS=		@LIBS@
+LDFLAGS=	@LDFLAGS@
+
+mkdir_p=	mkdir -p
+INSTALL=	install
+
+all: echidna
+
+echidna.o: echidna.c bufqueue.h config.h
+	${CC} -c -o $@ ${CPPFLAGS} ${CFLAGS} echidna.c
+
+echidna: echidna.o
+	${CC} -o $@ ${LDFLAGS} ${LIBS} $<
+
+install:
+	${mkdir_p} ${bindir}
+	${INSTALL} -s echidna ${bindir}/
+
+longtest:
+	date
+	zcat longtest.fq.gz | ./echidna "fastx_clipper -a ATCAATTCGTATGCCGTCTTCTGCTTG" | pigz -p3 -c - > long.gz
+	date
+
+shorttest:
+	zcat shorttest.gz|./echidna "fastx_clipper -a ATCAATTCGTATGCCGTCTTCTGCTTG" | pigz -p3 > shortresult.gz
+	zcat shortresult.gz|wc -l

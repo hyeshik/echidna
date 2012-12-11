@@ -39,6 +39,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include "bufqueue.h"
+#include "config.h"
 
 #define DEFAULT_NUM_WORKERS 4
 #define INQUEUE_SIZE        65536
