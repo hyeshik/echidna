@@ -218,7 +218,7 @@ handle_input_from_stdin_undecided(SESSION *sess)
             error(1, "FASTA support is not implemented yet.\n");
             break;
         default:
-            error(1, "Unknown input format: the first letter is not "
+            error(1, "Unknown input format: the first character is not "
                      "'@' or '>'.\n");
         }
 
@@ -280,6 +280,46 @@ handle_input_from_worker_fastq(SESSION *sess, WORKER *worker)
 }
 
 static int
+handle_input_from_worker_fasta(SESSION *sess, WORKER *worker)
+{
+    char *head, *tail, *cur, *leftend, *rightend;
+    qflag_t header_read;
+
+    head = cur = worker->inbuf->data + worker->inbuf->front;
+    leftend = worker->inbuf->data;
+    rightend = worker->inbuf->data + worker->inbuf->size;
+    tail = worker->inbuf->data + worker->inbuf->rear;
+    header_read = worker->inbuf->flags;
+
+    while (cur != tail) {
+        if (*cur == '\n')
+            worker->lineno++;
+
+        if (!header_read) {
+            if (*cur == '\n')
+                header_read = 1;
+        }
+        else if (*cur == '>') {
+            qsize_t recordsize;
+
+            recordsize = (head <= cur ? cur - head : (rightend - head) + (cur - leftend));
+
+            if (queue_transfer(sess->outbuf, worker->inbuf, recordsize) == -1)
+                break; /* TODO: handle records way too big in outbuf. */
+
+            head = cur;
+            header_read = 0;
+        }
+
+        if (++cur == rightend)
+            cur = leftend;
+    }
+
+    worker->inbuf->flags = header_read;
+    return 0;
+}
+
+static int
 handle_input_from_worker_undecided(SESSION *sess, WORKER *worker)
 {
     if (queue_num_filled(worker->inbuf) >= 1)
@@ -287,10 +327,9 @@ handle_input_from_worker_undecided(SESSION *sess, WORKER *worker)
         case '@': /* FASTQ */
             worker->input_handler = handle_input_from_worker_fastq;
             return handle_input_from_worker_fastq(sess, worker);
-            break;
         case '>': /* FASTA */
-            error(1, "FASTA support is not implemented yet.\n");
-            break;
+            worker->input_handler = handle_input_from_worker_fasta;
+            return handle_input_from_worker_fasta(sess, worker);
         default:
             error(1, "Unknown output format from worker: the first letter "
                      "is not '@' or '>'.\n");
@@ -590,8 +629,11 @@ main(int argc, char **argv)
     }
 
     if (session.command == NULL) {
-        if (optind >= argc)
-            error(1, "command is not supplied.\n");
+        if (optind >= argc) {
+            error(0, "command is not supplied.\n\n");
+            usage(argv[0]);
+            return 0;
+        }
 
         session.args = argv + optind;
     }

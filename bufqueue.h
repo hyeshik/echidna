@@ -24,11 +24,13 @@
  */
 
 typedef uint32_t qsize_t;
+typedef uint32_t qflag_t;
 
 typedef struct {
     qsize_t front;
     qsize_t rear;
     qsize_t size;
+    qflag_t flags;
     char data[1];
 } QUEUE;
 
@@ -38,12 +40,13 @@ queue_new(qsize_t size)
 {
     QUEUE *q;
 
-    q = malloc(sizeof(qsize_t)*3 + size);
+    q = malloc(sizeof(qsize_t)*3 + sizeof(qflag_t) + size);
     if (q == NULL)
         return NULL;
 
     q->front = q->rear = 0;
     q->size = size;
+    q->flags = 0;
 
     return q;
 }
