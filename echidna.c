@@ -207,6 +207,58 @@ handle_input_from_stdin_fastq(SESSION *sess)
 }
 
 static int
+handle_input_from_stdin_fasta(SESSION *sess)
+{
+    char *head, *tail, *cur, *leftend, *rightend;
+    int i, header_read;
+
+    head = cur = sess->inbuf->data + sess->inbuf->front;
+    leftend = sess->inbuf->data;
+    rightend = sess->inbuf->data + sess->inbuf->size;
+    tail = sess->inbuf->data + sess->inbuf->rear;
+
+    header_read = sess->inbuf->flags;
+
+    while (cur != tail) {
+        if (*cur == '\n')
+            sess->lineno++;
+
+        if (!header_read) {
+            if (*cur == '\n')
+                header_read = 1;
+        }
+        else if (*cur == '>') {
+            qsize_t recordsize;
+
+            recordsize = (head <= cur ? cur - head : (rightend - head) + (cur - leftend));
+
+            for (i = 0; i < sess->num_workers; i++) {
+                int wselected=(sess->rr_next + i) % sess->num_workers;
+
+                if (queue_transfer(sess->workers[wselected].outbuf,
+                                   sess->inbuf, recordsize) != -1) {
+                    sess->rr_next = (sess->rr_next+1) % sess->num_workers;
+                    break;
+                }
+                /* TODO: handle records way too big in outbuf. */
+            }
+
+            if (i == sess->num_workers) /* all buffers are full */
+                break;
+
+            head = cur;
+            header_read = 0;
+        }
+
+        if (++cur == rightend)
+            cur = leftend;
+    }
+
+    sess->inbuf->flags = header_read;
+    return 0;
+}
+
+static int
 handle_input_from_stdin_undecided(SESSION *sess)
 {
     if (queue_num_filled(sess->inbuf) >= 1)
@@ -214,10 +266,9 @@ handle_input_from_stdin_undecided(SESSION *sess)
         case '@': /* FASTQ */
             sess->input_handler = handle_input_from_stdin_fastq;
             return handle_input_from_stdin_fastq(sess);
-            break;
         case '>': /* FASTA */
-            error(1, "FASTA support is not implemented yet.\n");
-            break;
+            sess->input_handler = handle_input_from_stdin_fasta;
+            return handle_input_from_stdin_fasta(sess);
         default:
             error(1, "Unknown input format: the first character is not "
                      "'@' or '>'.\n");
@@ -608,6 +659,9 @@ main(int argc, char **argv)
         };
         int option_index=0;
   
+        if (*argv[optind] != '-') /* don't process options in given task command */
+            break;
+
         c = getopt_long(argc, argv, "c:hp:", long_options, &option_index);
   
         if (c == -1)
