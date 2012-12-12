@@ -55,10 +55,6 @@
 #define IS_STDIN_ALIVE(w)   ((w)->status & 1)
 #define IS_STDOUT_ALIVE(w)  ((w)->status & 2)
 
-#define FORMAT_UNDECIDED    0
-#define FORMAT_FASTQ        1
-#define FORMAT_FASTA        2
-
 struct _WORKER;
 struct _SESSION;
 
@@ -89,10 +85,18 @@ typedef struct _SESSION {
     int (*input_handler)(struct _SESSION *sess);
     uint64_t lineno;
 
+    int (*default_worker_input_handler)(struct _SESSION *sess, struct _WORKER *worker);
+
     /* Only one between `command' and `args' which is non-NULL is effective */
     const char *command;
     char **args;
 } SESSION;
+
+struct format_def {
+    const char *name;
+    int (*session_input_handler)(struct _SESSION *sess);
+    int (*worker_input_handler)(struct _SESSION *sess, struct _WORKER *worker);
+};
 
 static SESSION *global_session=NULL; /* for signal handlers */
 
@@ -259,6 +263,49 @@ handle_input_from_stdin_fasta(SESSION *sess)
 }
 
 static int
+handle_input_from_stdin_line(SESSION *sess)
+{
+    char *head, *tail, *cur, *leftend, *rightend;
+    int i;
+
+    head = cur = sess->inbuf->data + sess->inbuf->front;
+    leftend = sess->inbuf->data;
+    rightend = sess->inbuf->data + sess->inbuf->size;
+    tail = sess->inbuf->data + sess->inbuf->rear;
+
+    while (cur != tail) {
+        if (*cur == '\n') {
+            qsize_t recordsize;
+
+            sess->lineno++;
+            recordsize = (head <= cur ? cur + 1 - head :
+                            (rightend - head) + (cur + 1 - leftend));
+
+            for (i = 0; i < sess->num_workers; i++) {
+                int wselected=(sess->rr_next + i) % sess->num_workers;
+
+                if (queue_transfer(sess->workers[wselected].outbuf,
+                                   sess->inbuf, recordsize) != -1) {
+                    sess->rr_next = (sess->rr_next+1) % sess->num_workers;
+                    break;
+                }
+                /* TODO: handle records way too big in outbuf. */
+            }
+
+            if (i == sess->num_workers) /* all buffers are full */
+                break;
+
+            head = cur + 1;
+        }
+
+        if (++cur == rightend)
+            cur = leftend;
+    }
+
+    return 0;
+}
+
+static int
 handle_input_from_stdin_undecided(SESSION *sess)
 {
     if (queue_num_filled(sess->inbuf) >= 1)
@@ -372,6 +419,37 @@ handle_input_from_worker_fasta(SESSION *sess, WORKER *worker)
 }
 
 static int
+handle_input_from_worker_line(SESSION *sess, WORKER *worker)
+{
+    char *head, *tail, *cur, *leftend, *rightend;
+
+    head = cur = worker->inbuf->data + worker->inbuf->front;
+    leftend = worker->inbuf->data;
+    rightend = worker->inbuf->data + worker->inbuf->size;
+    tail = worker->inbuf->data + worker->inbuf->rear;
+
+    while (cur != tail) {
+        if (*cur == '\n') {
+            qsize_t recordsize;
+
+            worker->lineno++;
+            recordsize = (head <= cur ? cur + 1 - head :
+                            (rightend - head) + (cur + 1 - leftend));
+
+            if (queue_transfer(sess->outbuf, worker->inbuf, recordsize) == -1)
+                break; /* TODO: handle records way too big in outbuf. */
+
+            head = cur + 1;
+        }
+
+        if (++cur == rightend)
+            cur = leftend;
+    }
+
+    return 0;
+}
+
+static int
 handle_input_from_worker_undecided(SESSION *sess, WORKER *worker)
 {
     if (queue_num_filled(worker->inbuf) >= 1)
@@ -436,7 +514,7 @@ launch_workers(SESSION *sess)
         close(stdin_pipes[0]);
         close(stdout_pipes[1]);
 
-        sess->workers[i].input_handler = handle_input_from_worker_undecided;
+        sess->workers[i].input_handler = sess->default_worker_input_handler;
         sess->workers[i].status = STATUS_RUNNING;
         sess->running_workers++;
     }
@@ -632,12 +710,27 @@ usage(char *command)
 Usage: %s [options] [command]\n\
 \n\
 Options:\n\
-  -p, --processes=n     invoke n worker processes (default 4)\n\
-  -c, --command=\"cmd\"   invoke a shell command\n\
-  -h, --help            display this help\n\
+  -p, --processes=N           invoke N worker processes (default 4)\n\
+  -c, --command=\"CMD\"         invoke a shell command\n\
+  -i, --input-format=FORMAT   set input format. available formats are auto,\n\
+                                fasta, fastq, line, bed and gtf. `auto'\n\
+                                detects fasta or fastq only. (default auto)\n\
+  -o, --output-format=FORMAT  set output format. same formats are supported\n\
+                                as input formats. (default auto)\n\
+  -h, --help                  display this help\n\
 \n\
 Report bugs to Hyeshik Chang <hyeshik@snu.ac.kr>\n", command);
 }
+
+static struct format_def defined_formats[]={
+    {"auto",    handle_input_from_stdin_undecided, handle_input_from_worker_undecided},
+    {"fasta",   handle_input_from_stdin_fasta, handle_input_from_worker_fasta},
+    {"fastq",   handle_input_from_stdin_fastq, handle_input_from_worker_fastq},
+    {"line",    handle_input_from_stdin_line, handle_input_from_worker_line},
+    {"bed",     handle_input_from_stdin_line, handle_input_from_worker_line},
+    {"gtf",     handle_input_from_stdin_line, handle_input_from_worker_line},
+    {0, 0, 0}
+};
 
 int
 main(int argc, char **argv)
@@ -648,21 +741,25 @@ main(int argc, char **argv)
     memset(&session, 0, sizeof(SESSION));
     session.num_workers = DEFAULT_NUM_WORKERS;
     session.input_handler = handle_input_from_stdin_undecided;
+    session.default_worker_input_handler = handle_input_from_worker_undecided;
     global_session = &session;
 
     for (;;) {
         static struct option long_options[]={
-            {"command",     required_argument, 0, 'c'},
-            {"help",        no_argument,       0, 'h'},
-            {"processes",   required_argument, 0, 'p'},
+            {"command",         required_argument, 0, 'c'},
+            {"help",            no_argument,       0, 'h'},
+            {"processes",       required_argument, 0, 'p'},
+            {"input-format",    required_argument, 0, 'i'},
+            {"output-format",   required_argument, 0, 'o'},
             {0, 0, 0, 0}
         };
-        int option_index=0;
+        int i, option_index=0;
   
-        if (*argv[optind] != '-') /* don't process options in given task command */
+        /* don't process options in given task command */
+        if (optind < argc && *argv[optind] != '-')
             break;
 
-        c = getopt_long(argc, argv, "c:hp:", long_options, &option_index);
+        c = getopt_long(argc, argv, "c:hp:i:o:", long_options, &option_index);
   
         if (c == -1)
             break;
@@ -675,6 +772,27 @@ main(int argc, char **argv)
             break;
         case 'c':
             session.command = optarg;
+            break;
+        case 'i':
+            for (i = 0; defined_formats[i].name != NULL; i++)
+                if (strcmp(defined_formats[i].name, optarg) == 0) {
+                    session.input_handler = defined_formats[i].session_input_handler;
+                    break;
+                }
+
+            if (defined_formats[i].name == NULL)
+                error(1, "unknown input format: %s\n", optarg);
+            break;
+        case 'o':
+            for (i = 0; defined_formats[i].name != NULL; i++)
+                if (strcmp(defined_formats[i].name, optarg) == 0) {
+                    session.default_worker_input_handler =
+                        defined_formats[i].worker_input_handler;
+                    break;
+                }
+
+            if (defined_formats[i].name == NULL)
+                error(1, "unknown output format: %s\n", optarg);
             break;
         case 'h':
         default:
