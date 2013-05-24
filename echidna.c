@@ -553,7 +553,7 @@ main_loop(SESSION *sess)
     stdin_closed = 0;
 
     for (;;) {
-        int maxfd=-1;
+        int maxfd=-1, nevents;
         struct timeval tv, *timeout;
 
         if (stdin_closed || is_queue_full(sess->inbuf))
@@ -588,23 +588,32 @@ main_loop(SESSION *sess)
                 FD_CLR(w->stdin_fd, &wfds);
         }
 
-        if (maxfd < 0) {
-            if (sess->running_workers <= 0)
-                break;
+        if (maxfd < 0 && sess->running_workers <= 0)
+            break;
 
-            tv.tv_sec = 0;
-            tv.tv_usec = 50000;
-            timeout = &tv;
-        }
-        else
-            timeout = NULL;
+        tv.tv_sec = 0;
+        tv.tv_usec = 50000;
+        timeout = &tv;
 
-        if (select(maxfd + 1, &rfds, &wfds, &exfds, timeout) == -1) {
+        if ((nevents = select(maxfd + 1, &rfds, &wfds, &exfds, timeout)) == -1) {
             if (errno == EINTR)
                 continue;
 
             perror("echidna");
             error(1, "Error on select()\n");
+        }
+
+        if (nevents == 0) { /* select timed out. */
+            if (!is_queue_full(sess->outbuf)) {
+                /* Traverse all workers and try processing for blocked output queues. */
+                for (i = 0; i < sess->num_workers; i++) {
+                    WORKER *w=&sess->workers[i];
+
+                    if (w->status == STATUS_RUNNING && !is_queue_empty(w->inbuf))
+                        w->input_handler(sess, w);
+                }
+            }
+            continue;
         }
 
         if (FD_ISSET(STDIN_FILENO, &rfds)) {
