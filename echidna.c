@@ -592,7 +592,7 @@ main_loop(SESSION *sess)
             break;
 
         tv.tv_sec = 0;
-        tv.tv_usec = 50000;
+        tv.tv_usec = 500000;
         timeout = &tv;
 
         if ((nevents = select(maxfd + 1, &rfds, &wfds, &exfds, timeout)) == -1) {
